@@ -1,0 +1,10 @@
+com\quiver\node\Main.class
+com\quiver\network\NodeServer$PeerInfo.class
+com\quiver\node\ObjectStore.class
+com\quiver\network\SyncMessage.class
+com\quiver\node\ConfigLoader.class
+com\quiver\node\ConfigLoader$1.class
+com\quiver\node\NodeConfig.class
+com\quiver\crdt\LWWRegister.class
+com\quiver\crdt\VectorClock.class
+com\quiver\network\NodeServer.class

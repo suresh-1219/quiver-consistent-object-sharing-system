@@ -1,0 +1,7 @@
+{
+  "nodes": [
+    { "nodeId": "A", "host": "localhost", "port": 9001 },
+    { "nodeId": "B", "host": "localhost", "port": 9002 },
+    { "nodeId": "C", "host": "localhost", "port": 9003 }
+  ]
+}
