@@ -1,7 +1,7 @@
 {
   "nodes": [
-    { "nodeId": "A", "host": "localhost", "port": 9001 },
-    { "nodeId": "B", "host": "localhost", "port": 9002 },
-    { "nodeId": "C", "host": "localhost", "port": 9003 }
+    { "nodeId": "A", "host": "127.0.0.1", "port": 9001, "secret": "dev-secret-A-change-me" },
+    { "nodeId": "B", "host": "127.0.0.1", "port": 9002, "secret": "dev-secret-B-change-me" },
+    { "nodeId": "C", "host": "127.0.0.1", "port": 9003, "secret": "dev-secret-C-change-me" }
   ]
 }

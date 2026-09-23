@@ -3,10 +3,12 @@
   <groupId>com.quiver</groupId>
   <artifactId>quiver</artifactId>
   <version>0.0.1-SNAPSHOT</version>
-  
+  <name>Quiver</name>
+  <description>Distributed object synchronisation with CRDTs, vector clocks and a gossip sync protocol</description>
+
   <properties>
-    <maven.compiler.source>17</maven.compiler.source>
-    <maven.compiler.target>17</maven.compiler.target>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
 
   <dependencies>
@@ -22,13 +24,42 @@
       <scope>test</scope>
     </dependency>
   </dependencies>
-  
+
   <build>
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+        <configuration>
+          <compilerArgs>
+            <arg>-Xlint:all</arg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.2.5</version>
+      </plugin>
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>0.8.12</version>
+        <executions>
+          <execution>
+            <goals>
+              <goal>prepare-agent</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>coverage-report</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>report</goal>
+            </goals>
+          </execution>
+        </executions>
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -41,6 +72,7 @@
               <goal>shade</goal>
             </goals>
             <configuration>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <mainClass>com.quiver.node.Main</mainClass>
@@ -52,5 +84,4 @@
       </plugin>
     </plugins>
   </build>
-  
 </project>

@@ -1,3 +1,14 @@
+# Build output
 target/
+dependency-reduced-pom.xml
+
+# IDE
 .classpath
+.project
 .settings/
+.idea/
+*.iml
+.vscode/
+
+# OS noise
+.DS_Store
