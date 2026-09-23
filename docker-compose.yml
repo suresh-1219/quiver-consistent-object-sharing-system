@@ -1,0 +1,58 @@
+services:
+  node-a:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: quiver:latest
+    container_name: quiver-node-a
+    command: ["--node-id=A"]
+    volumes:
+      - node-a-data:/app/quiver-data
+    # Keeps this node's process alive waiting for input, the way a real terminal would.
+    # Main's CLI loop and the network server share one process, so closed stdin means
+    # the whole node shuts down — see the README's "Run with Docker" section.
+    stdin_open: true
+    tty: true
+    networks:
+      - quiver-net
+
+  node-b:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: quiver:latest
+    container_name: quiver-node-b
+    command: ["--node-id=B"]
+    volumes:
+      - node-b-data:/app/quiver-data
+    stdin_open: true
+    tty: true
+    networks:
+      - quiver-net
+    depends_on:
+      - node-a
+
+  node-c:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: quiver:latest
+    container_name: quiver-node-c
+    command: ["--node-id=C"]
+    volumes:
+      - node-c-data:/app/quiver-data
+    stdin_open: true
+    tty: true
+    networks:
+      - quiver-net
+    depends_on:
+      - node-a
+
+networks:
+  quiver-net:
+    driver: bridge
+
+volumes:
+  node-a-data:
+  node-b-data:
+  node-c-data:

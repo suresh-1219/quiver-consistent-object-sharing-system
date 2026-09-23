@@ -122,6 +122,18 @@ through the CRDT.
 
 Message types: `CREATE`, `UPDATE`, `GRANT_PERMISSION`, `SYNC_REQUEST`, `STATE`.
 
+## Run with Docker (fastest way to try it)
+
+No Java, Maven, or Eclipse setup needed — just Docker Desktop: 
+
+ ```
+ docker compose up --build -d
+ docker attach quiver-node-a
+ ```
+ 
+See [DOCKER.md](DOCKER.md) for the full walkthrough, including how to detach without stopping a node and how to test persistence across a container restart.
+
+
 ## Getting started
 
 ### Prerequisites

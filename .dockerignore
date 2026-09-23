@@ -1,0 +1,9 @@
+target/
+quiver-data/
+.git/
+.gitignore
+.classpath
+.project
+.settings/
+*.iml
+.idea/
