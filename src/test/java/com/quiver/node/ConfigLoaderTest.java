@@ -12,12 +12,18 @@ import org.junit.jupiter.api.io.TempDir;
 
 class ConfigLoaderTest {
 
+    // Real Ed25519 public keys (X.509 SubjectPublicKeyInfo, base64) — arbitrary for these
+    // parsing tests, but they must be *valid* keys so validate() doesn't reject them for
+    // the wrong reason.
+    private static final String PUB_A = "MCowBQYDK2VwAyEAOh+RtiIhe+ieGEaMWa1kGHOIxCyrIhWINpGt+Iky5l0=";
+    private static final String PUB_B = "MCowBQYDK2VwAyEAY6phr2VMX1fW5SIAWoNBfMTRSXvPi/t7CDwGwUXvwJg=";
+
     private static final String VALID = """
             { "nodes": [
-              { "nodeId": "A", "host": "127.0.0.1", "port": 9001, "secret": "sa" },
-              { "nodeId": "B", "host": "127.0.0.1", "port": 9002, "secret": "sb" }
+              { "nodeId": "A", "host": "127.0.0.1", "port": 9001, "publicKey": "%s" },
+              { "nodeId": "B", "host": "127.0.0.1", "port": 9002, "publicKey": "%s" }
             ] }
-            """;
+            """.formatted(PUB_A, PUB_B);
 
     @Test
     void loadsExplicitPath(@TempDir Path dir) throws IOException {
@@ -52,10 +58,23 @@ class ConfigLoaderTest {
     }
 
     @Test
-    void nodeWithoutSecretIsRejected(@TempDir Path dir) throws IOException {
+    void nodeWithoutPublicKeyIsRejected(@TempDir Path dir) throws IOException {
         Path file = Files.writeString(dir.resolve("config.json"),
                 """
                 { "nodes": [ { "nodeId": "A", "host": "127.0.0.1", "port": 9001 } ] }
+                """);
+
+        assertThrows(ConfigLoader.ConfigException.class, () -> ConfigLoader.load(file.toString()));
+    }
+
+    /** Regression: a config-time check should catch a broken key, not the first message this node verifies. */
+    @Test
+    void malformedPublicKeyIsRejectedAtLoadTime(@TempDir Path dir) throws IOException {
+        Path file = Files.writeString(dir.resolve("config.json"),
+                """
+                { "nodes": [
+                  { "nodeId": "A", "host": "127.0.0.1", "port": 9001, "publicKey": "not-a-real-key" }
+                ] }
                 """);
 
         assertThrows(ConfigLoader.ConfigException.class, () -> ConfigLoader.load(file.toString()));
@@ -66,10 +85,10 @@ class ConfigLoaderTest {
         Path file = Files.writeString(dir.resolve("config.json"),
                 """
                 { "nodes": [
-                  { "nodeId": "A", "host": "h", "port": 1, "secret": "s" },
-                  { "nodeId": "A", "host": "h", "port": 2, "secret": "s" }
+                  { "nodeId": "A", "host": "h", "port": 1, "publicKey": "%s" },
+                  { "nodeId": "A", "host": "h", "port": 2, "publicKey": "%s" }
                 ] }
-                """);
+                """.formatted(PUB_A, PUB_A));
 
         assertThrows(ConfigLoader.ConfigException.class, () -> ConfigLoader.load(file.toString()));
     }

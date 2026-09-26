@@ -16,15 +16,20 @@ public final class Main {
 
     private static final String USAGE = """
             Usage: java -jar quiver.jar --node-id=A [--port=9001] [--config=path/to/config.json]
-                                         [--data-dir=path/to/data]
+                                         [--data-dir=path/to/data] [--key-file=path/to/identity]
 
               --node-id   which entry in config.json this process is (required)
               --port      override the port from the config (optional)
               --config    path to a config file; defaults to ./config.json, then the
                           copy bundled in the jar
-              --data-dir  where this node's journal file lives; defaults to ./quiver-data.
-                          Each node's data is a separate file named <node-id>.jsonl, so
-                          nodes sharing a machine can share a --data-dir safely.
+              --data-dir  where this node's journal AND identity file live; defaults to
+                          ./quiver-data. Each node's journal is <node-id>.jsonl and its
+                          Ed25519 identity is <node-id>.key, so nodes sharing a machine
+                          can share a --data-dir safely.
+              --key-file  path to this node's identity file, overriding --data-dir's
+                          default location. If no identity is found anywhere, one is
+                          generated and its public key printed for you to add to
+                          config.json.
             """;
 
     private static final String HELP = """
@@ -73,6 +78,25 @@ public final class Main {
         Path dataDir = Path.of(flags.getOrDefault("data-dir", "quiver-data"));
         Path journalPath = dataDir.resolve(nodeId + ".jsonl");
 
+        java.security.KeyPair selfKeyPair;
+        try {
+            selfKeyPair = NodeKeyStore.resolve(nodeId, flags.get("key-file"), dataDir);
+        } catch (RuntimeException e) {
+            System.err.println("Identity error: " + e.getMessage());
+            System.exit(1);
+            return;
+        }
+        String declaredKey = self.publicKey;
+        String actualKey = NodeKeyStore.encodePublic(selfKeyPair.getPublic());
+        if (!declaredKey.equals(actualKey)) {
+            System.err.printf("""
+                    WARNING: the identity loaded for '%s' does not match the publicKey in config.json.
+                    Peers will reject every message this node sends until one of the two is updated.
+                      config.json declares: %s
+                      loaded identity is:   %s
+                    """, nodeId, declaredKey, actualKey);
+        }
+
         ObjectStore store = new ObjectStore(nodeId);
         JournalStore journal;
         try {
@@ -88,7 +112,7 @@ public final class Main {
             return;
         }
 
-        NodeServer server = new NodeServer(nodeId, port, store, cluster);
+        NodeServer server = new NodeServer(nodeId, selfKeyPair, port, store, cluster);
         try {
             server.start();
         } catch (IOException e) {

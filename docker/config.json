@@ -1,7 +1,7 @@
 {
   "nodes": [
-    { "nodeId": "A", "host": "node-a", "port": 9001, "secret": "dev-secret-A-change-me" },
-    { "nodeId": "B", "host": "node-b", "port": 9001, "secret": "dev-secret-B-change-me" },
-    { "nodeId": "C", "host": "node-c", "port": 9001, "secret": "dev-secret-C-change-me" }
+    { "nodeId": "A", "host": "node-a", "port": 9001, "publicKey": "MCowBQYDK2VwAyEAOh+RtiIhe+ieGEaMWa1kGHOIxCyrIhWINpGt+Iky5l0=" },
+    { "nodeId": "B", "host": "node-b", "port": 9001, "publicKey": "MCowBQYDK2VwAyEAY6phr2VMX1fW5SIAWoNBfMTRSXvPi/t7CDwGwUXvwJg=" },
+    { "nodeId": "C", "host": "node-c", "port": 9001, "publicKey": "MCowBQYDK2VwAyEAmGdX5z9US+sIO73hFbGzHa7KmH/9396R9GVxUojYjpA=" }
   ]
 }

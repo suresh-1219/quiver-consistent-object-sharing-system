@@ -2,6 +2,10 @@
 target/
 dependency-reduced-pom.xml
 
+# Per-node runtime state: journals AND, since the Ed25519 change, a node's real private
+# key if one gets generated here (see NodeKeyStore). Never commit this directory.
+quiver-data/
+
 # IDE
 .classpath
 .project

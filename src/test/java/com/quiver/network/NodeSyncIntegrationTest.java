@@ -6,14 +6,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.quiver.node.ClusterConfig;
 import com.quiver.node.NodeConfig;
+import com.quiver.node.NodeKeyStore;
 import com.quiver.node.ObjectStore;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.security.KeyPair;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -24,6 +28,9 @@ class NodeSyncIntegrationTest {
     private static final Duration TIMEOUT = Duration.ofSeconds(5);
 
     private final List<NodeServer> started = new ArrayList<>();
+    // Each test's clusterOf() call populates this so start() can find that node's own
+    // keypair; ClusterConfig only ever carries public keys, by design (see NodeConfig).
+    private final Map<String, KeyPair> keysByNodeId = new HashMap<>();
 
     @AfterEach
     void stopNodes() {
@@ -99,7 +106,7 @@ class NodeSyncIntegrationTest {
         storeA.updateObject("doc1", "owned-by-A");
 
         String forged = """
-                {"senderNodeId":"A","sentAtMillis":%d,"nonce":"x","payloadJson":"{}","mac":"00"}
+                {"senderNodeId":"A","sentAtMillis":%d,"nonce":"x","payloadJson":"{}","signature":"AA=="}
                 """.formatted(System.currentTimeMillis());
         try (Socket socket = new Socket("127.0.0.1", serverA.boundPort());
              PrintWriter writer = new PrintWriter(socket.getOutputStream(), true)) {
@@ -136,16 +143,28 @@ class NodeSyncIntegrationTest {
     // ------------------------------------------------------------------------- helpers
 
     private NodeServer start(String nodeId, ClusterConfig cluster, ObjectStore store) throws IOException {
-        NodeServer server = new NodeServer(nodeId, cluster.require(nodeId).port, store, cluster);
+        KeyPair selfKeyPair = keysByNodeId.get(nodeId);
+        NodeServer server = new NodeServer(nodeId, selfKeyPair, cluster.require(nodeId).port, store, cluster);
         server.start();
         started.add(server);
         return server;
     }
 
-    private static ClusterConfig clusterOf(String... nodeIds) throws IOException {
+    /**
+     * Builds a cluster of real Ed25519 identities, one per node id. The public halves go
+     * into the returned {@link ClusterConfig} (exactly what ships in {@code config.json}
+     * in production); the private halves are stashed in {@link #keysByNodeId} so {@link
+     * #start} can hand each node its own key when constructing its {@link NodeServer} —
+     * mirroring how a real deployment keeps private keys node-local and out of the
+     * shared config entirely.
+     */
+    private ClusterConfig clusterOf(String... nodeIds) throws IOException {
         List<NodeConfig> nodes = new ArrayList<>();
         for (String id : nodeIds) {
-            nodes.add(new NodeConfig(id, "127.0.0.1", freePort(), "secret-" + id));
+            KeyPair keyPair = NodeKeyStore.generate();
+            keysByNodeId.put(id, keyPair);
+            String publicKey = NodeKeyStore.encodePublic(keyPair.getPublic());
+            nodes.add(new NodeConfig(id, "127.0.0.1", freePort(), publicKey));
         }
         return new ClusterConfig(nodes);
     }

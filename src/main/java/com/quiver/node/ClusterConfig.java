@@ -1,5 +1,6 @@
 package com.quiver.node;
 
+import java.security.PublicKey;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,10 +35,11 @@ public final class ClusterConfig {
         return nodesById.values().stream().filter(n -> !n.nodeId.equals(nodeId)).toList();
     }
 
-    public Map<String, String> secretsByNodeId() {
-        Map<String, String> secrets = new LinkedHashMap<>();
-        nodesById.forEach((id, node) -> secrets.put(id, node.secret));
-        return secrets;
+    /** Every node's public key, decoded, keyed by node id — what a {@code MessageSigner} verifies against. */
+    public Map<String, PublicKey> publicKeysByNodeId() {
+        Map<String, PublicKey> keys = new LinkedHashMap<>();
+        nodesById.forEach((id, node) -> keys.put(id, NodeKeyStore.decodePublic(node.publicKey)));
+        return keys;
     }
 
     public java.util.Set<String> nodeIds() {

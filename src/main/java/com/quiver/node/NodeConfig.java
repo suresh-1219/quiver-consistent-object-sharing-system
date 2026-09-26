@@ -1,22 +1,28 @@
 package com.quiver.node;
 
-/** One node's entry in {@code config.json}. */
+/**
+ * One node's entry in {@code config.json}.
+ *
+ * <p>{@code publicKey} is exactly that — public. It's how every peer verifies messages
+ * claiming to come from this node, and it is meant to be shared and committed, the way
+ * an SSH {@code known_hosts} entry is. The matching private key never appears here; see
+ * {@link NodeKeyStore}.
+ */
 public final class NodeConfig {
 
     public String nodeId;
     public String host;
     public int port;
-    /** Pre-shared HMAC key. See README "Security model" before using in anger. */
-    public String secret;
+    public String publicKey;
 
     public NodeConfig() {
     }
 
-    public NodeConfig(String nodeId, String host, int port, String secret) {
+    public NodeConfig(String nodeId, String host, int port, String publicKey) {
         this.nodeId = nodeId;
         this.host = host;
         this.port = port;
-        this.secret = secret;
+        this.publicKey = publicKey;
     }
 
     public void validate() {
@@ -29,9 +35,12 @@ public final class NodeConfig {
         if (port < 1 || port > 65535) {
             throw new IllegalArgumentException("node '" + nodeId + "' has invalid port " + port);
         }
-        if (secret == null || secret.isBlank()) {
-            throw new IllegalArgumentException("node '" + nodeId + "' missing secret");
+        if (publicKey == null || publicKey.isBlank()) {
+            throw new IllegalArgumentException("node '" + nodeId + "' missing publicKey");
         }
+        // Fail fast on a malformed key at config-load time rather than at the first
+        // message this node ever tries to verify.
+        NodeKeyStore.decodePublic(publicKey);
     }
 
     @Override

@@ -66,6 +66,27 @@ docker attach quiver-node-b
 status doc1
 ```
 
+## Node identity in this setup
+
+Each container falls back to the bundled demo Ed25519 identity described in the main
+README's "Security model" — that's why `docker attach` and the create/update commands
+above work with zero extra setup. Since the named volumes (`node-a-data`, etc.) start
+empty, every container restart uses the same bundled demo key again rather than
+persisting one; that's expected and matches how the identities ship in the jar.
+
+To give a container a real, non-demo identity instead, generate one on your host first
+(see the main README's "Using a real identity instead of the demo keys"), then mount it
+in as that node's data directory:
+
+```yaml
+    volumes:
+      - ./my-data/node-a:/app/quiver-data   # replace the named volume for this one node
+```
+
+Put the generated `A.key` inside `./my-data/node-a/` and update the matching `publicKey`
+in `docker/config.json` for every node — same rule as running locally: public keys are
+shared and safe to commit, the private key file is neither.
+
 ## Testing persistence
 
 ```

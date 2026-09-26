@@ -18,8 +18,9 @@ clocks, authenticated peer-to-peer sync, and an ownership/permission model.
   resolved identically on every replica, so all copies converge
 - **Vector clocks** for causal ordering — every write carries a clock, so nodes can tell
   whether one write happened BEFORE, AFTER or CONCURRENTLY with another
-- **Authenticated sync protocol** over raw TCP — messages are HMAC-signed, and writes are
-  checked against the object's ACL before they are applied
+- **Authenticated sync protocol** over raw TCP — every message carries an Ed25519
+  signature from its sender's own private key, and writes are checked against the
+  object's ACL before they are applied
 - **Ownership and permissions** — each object has an owner who can grant write access;
   grants propagate to peers and are only honoured when they come from the owner
 - **Full state transfer** — a node that joins late asks its peers for a snapshot and
@@ -73,19 +74,51 @@ would periodically compact it down to one line per object using `ObjectStore.sna
 ## Security model
 
 Every message is wrapped in an envelope carrying the sender id, a timestamp, a nonce and
-an HMAC-SHA256 tag over all of them. Receivers reject messages that fail the MAC check,
-come from an unknown node, fall outside a 60-second freshness window, or replay a nonce
-they have already seen. Writes are then authorised against the object's ACL, so an
-authenticated-but-unauthorised peer still cannot change an object it has no write
-permission for.
+an **Ed25519 signature** over all of them, made with the sender's own private key.
+Receivers verify against the sender's *public* key — listed in `config.json`, the way an
+SSH `known_hosts` entry lists a host's public key — and reject anything that fails
+verification, comes from an unrecognised node, falls outside a 60-second freshness
+window, or replays a nonce already seen. Writes are then authorised against the object's
+ACL, so an authenticated-but-unauthorised peer still cannot change an object it has no
+write permission for.
 
-What this does **not** give you:
+This project's authentication scheme went through one real revision, and the reason is
+worth stating plainly: an earlier version used a single HMAC secret shared by every node.
+That proved cluster *membership* — "someone holding a valid key sent this" — but not
+sender *identity*, because whatever let a node verify a peer's message would have equally
+let it forge one. Ed25519 is asymmetric: verifying only needs the public key, so a peer
+that can confirm "this came from A" gains no ability to produce something that looks like
+it came from A. That is the property "authentication" is supposed to mean, and closing
+this gap was this project's first real post-launch security fix — see git history for the
+before/after.
 
-- **Non-repudiation.** Keys are symmetric and shared through `config.json`, so a node
-  that can verify a peer could also impersonate it. Per-node key pairs (Ed25519) or mTLS
-  is the natural next step.
-- **Confidentiality.** Traffic is signed, not encrypted.
-- The bundled secrets in `config.json` are development placeholders. Replace them.
+**Key distribution**, since asymmetric crypto raises a question HMAC's single shared
+secret didn't: `NodeKeyStore.resolve()` looks for a node's private key in this order —
+an explicit `--key-file`, then `<data-dir>/<node-id>.key`, then a bundled demo identity
+(see below), then generates a fresh one and prints the public key to paste into
+`config.json`. Public keys are safe to commit; a node's own private key never should be
+— `quiver-data/` (the default location one would land in) is gitignored for exactly this
+reason.
+
+**The bundled demo identities** (`src/main/resources/demo-keys/`) are what let `mvn
+clean verify && java -jar quiver.jar --node-id=A` work with zero setup, matching
+`config.json`'s bundled public keys out of the box. Using one prints a loud runtime
+warning, because these private keys ship inside the jar and are public knowledge — fine
+for trying the project out, never acceptable for anything real. Delete
+`quiver-data/<node-id>.key` if one exists and start fresh (or pass `--key-file`) to get a
+real, private identity instead.
+
+What this still does **not** give you:
+
+- **Confidentiality.** Traffic is signed, not encrypted — anyone watching the network can
+  read message contents, just not forge or silently tamper with them.
+- **Key revocation or rotation.** If a private key is compromised, the fix today is
+  generating a new one and manually updating `config.json` on every peer. There is no
+  revocation list or expiry.
+- **A trust bootstrap mechanism.** `config.json` is how a node learns which public keys
+  to trust in the first place, and nothing here verifies that file's contents came from
+  a legitimate source — the same way a freshly-created SSH `known_hosts` file has to be
+  trusted somehow the first time.
 
 ## Tech stack
 
@@ -94,7 +127,7 @@ What this does **not** give you:
 | Java 17 | Language |
 | Raw TCP sockets | Node-to-node networking |
 | Gson | JSON (de)serialisation |
-| javax.crypto HMAC-SHA256 | Message authentication |
+| java.security Ed25519 (JEP 339) | Message authentication, no external crypto library |
 | Custom CRDTs | Conflict-free convergence |
 | JUnit 5 | Unit and socket-level integration tests |
 | Maven | Build |
@@ -122,18 +155,6 @@ through the CRDT.
 
 Message types: `CREATE`, `UPDATE`, `GRANT_PERMISSION`, `SYNC_REQUEST`, `STATE`.
 
-## Run with Docker (fastest way to try it)
-
-No Java, Maven, or Eclipse setup needed — just Docker Desktop: 
-
- ```
- docker compose up --build -d
- docker attach quiver-node-a
- ```
- 
-See [DOCKER.md](DOCKER.md) for the full walkthrough, including how to detach without stopping a node and how to test persistence across a container restart.
-
-
 ## Getting started
 
 ### Prerequisites
@@ -159,21 +180,46 @@ java -jar target/quiver-0.0.1-SNAPSHOT.jar --node-id=C
 ```
 
 Ports come from the config; `--port=9005` overrides one, `--config=path/to/config.json`
-points at a different cluster definition, and `--data-dir=path` controls where each
-node's journal file lives (defaults to `./quiver-data`; each node writes to its own
-`<node-id>.jsonl` inside it, so nodes can share a `--data-dir` safely):
+points at a different cluster definition, `--data-dir=path` controls where each node's
+journal *and* identity file live (defaults to `./quiver-data`; each node writes its own
+`<node-id>.jsonl` and reads/generates its own `<node-id>.key` inside it), and
+`--key-file=path` overrides just the identity file's location:
 
 ```json
 {
   "nodes": [
-    { "nodeId": "A", "host": "127.0.0.1", "port": 9001, "secret": "dev-secret-A-change-me" },
-    { "nodeId": "B", "host": "127.0.0.1", "port": 9002, "secret": "dev-secret-B-change-me" },
-    { "nodeId": "C", "host": "127.0.0.1", "port": 9003, "secret": "dev-secret-C-change-me" }
+    { "nodeId": "A", "host": "127.0.0.1", "port": 9001, "publicKey": "MCowBQYDK2VwAyEAOh+RtiIhe+ieGEaMWa1kGHOIxCyrIhWINpGt+Iky5l0=" },
+    { "nodeId": "B", "host": "127.0.0.1", "port": 9002, "publicKey": "MCowBQYDK2VwAyEAY6phr2VMX1fW5SIAWoNBfMTRSXvPi/t7CDwGwUXvwJg=" },
+    { "nodeId": "C", "host": "127.0.0.1", "port": 9003, "publicKey": "MCowBQYDK2VwAyEAmGdX5z9US+sIO73hFbGzHa7KmH/9396R9GVxUojYjpA=" }
   ]
 }
 ```
 
-Every node needs the same file: the secrets are how nodes recognise each other.
+Every node needs the same file: these public keys are how a node verifies who a message
+actually came from. The three keys above match the bundled demo identities described in
+"Security model" — real, working Ed25519 keys, just not private ones worth trusting for
+anything beyond trying the project out.
+
+### Using a real identity instead of the demo keys
+
+The commands above use the bundled demo identities (see "Security model") — fine for
+trying things out, not for anything you'd trust. To use a real one:
+
+```bash
+java -jar target/quiver-0.0.1-SNAPSHOT.jar --node-id=A --data-dir=my-data
+```
+
+With no `my-data/A.key` yet, this generates a fresh Ed25519 identity, saves it there, and
+prints something like:
+
+```
+Generated a new identity for node 'A' at /path/to/my-data/A.key. Add this to
+config.json so peers trust it:
+  "publicKey": "<a real base64 public key>"
+```
+
+Paste that `publicKey` value into every peer's `config.json` for node A, and `my-data/`
+(gitignored) now holds A's real private key instead of the demo one.
 
 ### CLI commands
 
@@ -216,7 +262,9 @@ These are deliberate boundaries, not oversights:
 - **Full-mesh broadcast, not epidemic gossip.** Every node talks to every configured peer
   directly, which is fine at this scale but does not fan out.
 - **Static membership.** Nodes are listed in `config.json`; there is no join/leave protocol.
-- **Symmetric keys.** See "Security model".
+- **No key revocation, rotation, or trust bootstrap.** See "Security model" — closing the
+  non-repudiation gap didn't remove every open question asymmetric crypto raises, just
+  the one this project set out to fix.
 
 ## License
 

@@ -15,6 +15,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -30,7 +31,9 @@ import java.util.logging.Logger;
  * <ul>
  *   <li>Every inbound message is authenticated before it is parsed, and every state
  *       change is authorised against the ACL. Previously any socket could forge a
- *       sender id and overwrite any object.</li>
+ *       sender id and overwrite any object. Authentication is now Ed25519 signatures
+ *       (see {@link MessageSigner}), not a secret shared by the whole cluster, so
+ *       verifying a message no longer implies the ability to forge one.</li>
  *   <li>Malformed input is handled, not fatal. A single bad line used to kill a
  *       connection thread with a Gson stack trace on the user's prompt.</li>
  *   <li>Connections are served by a bounded pool with read timeouts and a line-length
@@ -53,7 +56,7 @@ public final class NodeServer implements AutoCloseable {
     private final int configuredPort;
     private final ObjectStore store;
     private final ClusterConfig cluster;
-    private final MessageAuthenticator authenticator;
+    private final MessageSigner signer;
     private final Gson gson = new Gson();
 
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -67,12 +70,12 @@ public final class NodeServer implements AutoCloseable {
     private ServerSocket serverSocket;
     private Thread acceptThread;
 
-    public NodeServer(String nodeId, int port, ObjectStore store, ClusterConfig cluster) {
+    public NodeServer(String nodeId, KeyPair selfKeyPair, int port, ObjectStore store, ClusterConfig cluster) {
         this.nodeId = nodeId;
         this.configuredPort = port;
         this.store = store;
         this.cluster = cluster;
-        this.authenticator = new MessageAuthenticator(cluster.secretsByNodeId());
+        this.signer = new MessageSigner(nodeId, selfKeyPair, cluster.publicKeysByNodeId());
     }
 
     /** Binds synchronously, so a caller (or a test) knows the node is reachable on return. */
@@ -148,9 +151,9 @@ public final class NodeServer implements AutoCloseable {
         }
         SyncMessage message;
         try {
-            MessageAuthenticator.Envelope envelope =
-                    gson.fromJson(line, MessageAuthenticator.Envelope.class);
-            String payloadJson = authenticator.open(envelope);
+            MessageSigner.Envelope envelope =
+                    gson.fromJson(line, MessageSigner.Envelope.class);
+            String payloadJson = signer.open(envelope);
             message = gson.fromJson(payloadJson, SyncMessage.class);
             if (message == null) {
                 throw new IllegalArgumentException("empty payload");
@@ -159,7 +162,7 @@ public final class NodeServer implements AutoCloseable {
             if (!envelope.senderNodeId.equals(message.senderNodeId)) {
                 throw new IllegalArgumentException("payload sender does not match envelope sender");
             }
-        } catch (MessageAuthenticator.AuthenticationException e) {
+        } catch (MessageSigner.AuthenticationException e) {
             LOG.warning("[" + nodeId + "] rejected unauthenticated message: " + e.getMessage());
             return;
         } catch (JsonSyntaxException | IllegalArgumentException | IllegalStateException e) {
@@ -225,7 +228,7 @@ public final class NodeServer implements AutoCloseable {
     }
 
     private void send(NodeConfig peer, SyncMessage message) {
-        String line = gson.toJson(authenticator.seal(nodeId, gson.toJson(message)));
+        String line = gson.toJson(signer.seal(gson.toJson(message)));
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress(peer.host, peer.port), CONNECT_TIMEOUT_MILLIS);
             PrintWriter writer = new PrintWriter(

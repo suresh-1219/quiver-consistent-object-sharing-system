@@ -90,7 +90,7 @@ public final class ConfigLoader {
         }
         try {
             return new ClusterConfig(data.get("nodes"));
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalArgumentException | NodeKeyStore.KeyStoreException e) {
             throw new ConfigException("Invalid config in " + source + ": " + e.getMessage(), e);
         }
     }
