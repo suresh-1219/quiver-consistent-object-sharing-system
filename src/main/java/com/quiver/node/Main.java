@@ -2,6 +2,9 @@ package com.quiver.node;
 
 import com.quiver.network.NodeServer;
 import com.quiver.network.SyncMessage;
+import com.quiver.observability.JsonLogFormatter;
+import com.quiver.observability.Metrics;
+import com.quiver.observability.MetricsHttpServer;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -10,6 +13,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.logging.Handler;
+import java.util.logging.Logger;
 
 /** Entry point: starts one node and runs its interactive command loop. */
 public final class Main {
@@ -26,10 +31,15 @@ public final class Main {
                           ./quiver-data. Each node's journal is <node-id>.jsonl and its
                           Ed25519 identity is <node-id>.key, so nodes sharing a machine
                           can share a --data-dir safely.
-              --key-file  path to this node's identity file, overriding --data-dir's
-                          default location. If no identity is found anywhere, one is
-                          generated and its public key printed for you to add to
-                          config.json.
+              --key-file      path to this node's identity file, overriding --data-dir's
+                              default location. If no identity is found anywhere, one is
+                              generated and its public key printed for you to add to
+                              config.json.
+              --metrics-port  port for the Prometheus /metrics endpoint; defaults to
+                              this node's port + 1000 (e.g. 9001 -> 10001)
+              --no-metrics    don't start the metrics endpoint at all
+              --log-format    'text' (default, human-readable) or 'json' (one
+                              structured JSON object per line, for log aggregators)
             """;
 
     private static final String HELP = """
@@ -52,6 +62,10 @@ public final class Main {
         if (nodeId == null || flags.containsKey("help")) {
             System.out.print(USAGE);
             System.exit(nodeId == null ? 2 : 0);
+        }
+
+        if ("json".equalsIgnoreCase(flags.get("log-format"))) {
+            installJsonLogging(nodeId);
         }
 
         ClusterConfig cluster;
@@ -97,13 +111,18 @@ public final class Main {
                     """, nodeId, declaredKey, actualKey);
         }
 
+        // Created before the journal on purpose: the journal reports append counts into
+        // this same registry, so it must exist first. (Opening the journal with the
+        // one-argument open() instead would silently count into a private registry that
+        // nothing ever scrapes.)
+        Metrics metrics = new Metrics();
         ObjectStore store = new ObjectStore(nodeId);
         JournalStore journal;
         try {
             // Replay first, into a store with no listener attached yet, so reading the
             // journal back in does not immediately write it back out again.
             JournalStore.replayInto(journalPath, store);
-            journal = JournalStore.open(journalPath);
+            journal = JournalStore.open(journalPath, metrics);
             store.setChangeListener(journal.asChangeListener());
         } catch (IOException e) {
             System.err.println("Could not open journal at " + journalPath.toAbsolutePath()
@@ -112,7 +131,10 @@ public final class Main {
             return;
         }
 
-        NodeServer server = new NodeServer(nodeId, selfKeyPair, port, store, cluster);
+        metrics.registerGauge("quiver_known_objects", "Objects currently known to this node",
+                Map.of(), () -> (double) store.listObjects().size());
+
+        NodeServer server = new NodeServer(nodeId, selfKeyPair, port, store, cluster, metrics);
         try {
             server.start();
         } catch (IOException e) {
@@ -121,10 +143,39 @@ public final class Main {
             System.exit(1);
             return;
         }
+
+        MetricsHttpServer metricsServer = null;
+        if (!flags.containsKey("no-metrics")) {
+            int metricsPort = port + 1000;
+            if (flags.containsKey("metrics-port")) {
+                try {
+                    metricsPort = Integer.parseInt(flags.get("metrics-port"));
+                } catch (NumberFormatException e) {
+                    System.err.println("Invalid --metrics-port value: " + flags.get("metrics-port"));
+                }
+            }
+            try {
+                metricsServer = MetricsHttpServer.start(metricsPort, metrics);
+                System.out.printf("Metrics available at http://localhost:%d/metrics%n", metricsPort);
+            } catch (IOException | LinkageError e) {
+                // A node is still fully functional without metrics; this is worth knowing
+                // about but never worth refusing to start over. LinkageError (which
+                // includes NoClassDefFoundError) is caught too: a slim JRE image built
+                // without the jdk.httpserver module would otherwise crash startup over
+                // a purely optional feature.
+                System.err.println("Could not start metrics endpoint on port " + metricsPort
+                        + ": " + e.getMessage() + " (continuing without it)");
+            }
+        }
+
         JournalStore journalToClose = journal;
+        MetricsHttpServer metricsServerToClose = metricsServer;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.close();
             journalToClose.close();
+            if (metricsServerToClose != null) {
+                metricsServerToClose.close();
+            }
         }, "quiver-shutdown"));
 
         if (!store.listObjects().isEmpty()) {
@@ -138,12 +189,13 @@ public final class Main {
         System.out.println("Requested a full sync from peers.");
         System.out.print(HELP);
 
-        int exitCode = runCommandLoop(nodeId, store, server);
+        int exitCode = runCommandLoop(nodeId, store, server, metrics);
         server.close();
         System.exit(exitCode);
     }
 
-    private static int runCommandLoop(String nodeId, ObjectStore store, NodeServer server) {
+    private static int runCommandLoop(String nodeId, ObjectStore store, NodeServer server,
+                                      Metrics metrics) {
         try (BufferedReader in = new BufferedReader(
                 new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
             while (true) {
@@ -158,7 +210,7 @@ public final class Main {
                 if (line.isEmpty()) {
                     continue;
                 }
-                if (!execute(line, nodeId, store, server)) {
+                if (!execute(line, nodeId, store, server, metrics)) {
                     return 0;
                 }
             }
@@ -169,7 +221,8 @@ public final class Main {
     }
 
     /** @return false when the node should shut down. */
-    private static boolean execute(String line, String nodeId, ObjectStore store, NodeServer server) {
+    private static boolean execute(String line, String nodeId, ObjectStore store,
+                                   NodeServer server, Metrics metrics) {
         String[] parts = line.split("\\s+", 3);
         switch (parts[0]) {
             case "create" -> {
@@ -180,6 +233,8 @@ public final class Main {
                 String name = parts[1];
                 if (store.createObject(name) == ObjectStore.CreateOutcome.CREATED) {
                     System.out.printf("Created '%s' (owner: %s)%n", name, nodeId);
+                    metrics.incCounter("quiver_objects_created_total",
+                            "Objects newly created on this node", Map.of("source", "local"));
                     server.broadcast(SyncMessage.create(name, nodeId));
                 } else {
                     System.out.printf("'%s' already exists (owner: %s)%n", name, store.getOwner(name));
@@ -194,13 +249,25 @@ public final class Main {
                 switch (store.updateObject(name, parts[2])) {
                     case UPDATED -> {
                         System.out.printf("Updated '%s'%n", name);
+                        metrics.incCounter("quiver_writes_applied_total",
+                                "Writes accepted into the CRDT", Map.of("source", "local"));
                         server.broadcast(SyncMessage.update(
                                 name, store.getObjectValue(name), store.getObjectTimestamp(name), nodeId));
                     }
-                    case NOT_FOUND -> System.out.printf("No such object: '%s'%n", name);
-                    case ACCESS_DENIED -> System.out.printf(
-                            "Access denied: '%s' is owned by %s and has not granted you write access%n",
-                            name, store.getOwner(name));
+                    case NOT_FOUND -> {
+                        System.out.printf("No such object: '%s'%n", name);
+                        metrics.incCounter("quiver_writes_denied_total",
+                                "Writes refused: sender not authorized, or object unknown",
+                                Map.of("source", "local", "reason", "unknown_object"));
+                    }
+                    case ACCESS_DENIED -> {
+                        System.out.printf(
+                                "Access denied: '%s' is owned by %s and has not granted you write access%n",
+                                name, store.getOwner(name));
+                        metrics.incCounter("quiver_writes_denied_total",
+                                "Writes refused: sender not authorized, or object unknown",
+                                Map.of("source", "local", "reason", "unauthorized"));
+                    }
                 }
             }
             case "set-permission" -> {
@@ -215,13 +282,20 @@ public final class Main {
                 switch (store.grantPermission(name, permission, target, nodeId)) {
                     case GRANTED -> {
                         System.out.printf("Granted write on '%s' to '%s'%n", name, target);
+                        metrics.incCounter("quiver_grants_applied_total",
+                                "Write-permission grants applied", Map.of("source", "local"));
                         server.broadcast(SyncMessage.grantPermission(name, permission, target, nodeId));
                     }
                     case READ_IS_PUBLIC -> System.out.println(
                             "Reads are public in this implementation; nothing to grant.");
-                    case NOT_OWNER -> System.out.printf(
-                            "Access denied: only the owner (%s) can grant permissions on '%s'%n",
-                            store.getOwner(name), name);
+                    case NOT_OWNER -> {
+                        System.out.printf(
+                                "Access denied: only the owner (%s) can grant permissions on '%s'%n",
+                                store.getOwner(name), name);
+                        metrics.incCounter("quiver_grants_denied_total",
+                                "Grants refused because the requester is not the owner",
+                                Map.of("source", "local"));
+                    }
                     case UNKNOWN_OBJECT -> System.out.printf("No such object: '%s'%n", name);
                     case UNKNOWN_PERMISSION -> System.out.printf(
                             "Unknown permission '%s' (expected read or write)%n", permission);
@@ -256,6 +330,21 @@ public final class Main {
             default -> System.out.printf("Unknown command: '%s' (try 'help')%n", parts[0]);
         }
         return true;
+    }
+
+    /**
+     * Swaps every handler on the root logger to use {@link JsonLogFormatter} instead of
+     * {@code java.util.logging}'s default human-readable format. Every existing {@code
+     * LOG.info(...)} / {@code LOG.warning(...)} call site elsewhere in the codebase is
+     * untouched and becomes structured for free — see {@link JsonLogFormatter}'s javadoc
+     * for why that approach was chosen over rewriting call sites by hand.
+     */
+    private static void installJsonLogging(String nodeId) {
+        JsonLogFormatter formatter = new JsonLogFormatter(nodeId);
+        Logger root = Logger.getLogger("");
+        for (Handler handler : root.getHandlers()) {
+            handler.setFormatter(formatter);
+        }
     }
 
     private static Map<String, String> parseFlags(String[] args) {

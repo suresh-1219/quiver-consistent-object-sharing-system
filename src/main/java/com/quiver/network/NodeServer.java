@@ -5,6 +5,7 @@ import com.google.gson.JsonSyntaxException;
 import com.quiver.node.ClusterConfig;
 import com.quiver.node.NodeConfig;
 import com.quiver.node.ObjectStore;
+import com.quiver.observability.Metrics;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -17,6 +18,7 @@ import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -57,6 +59,7 @@ public final class NodeServer implements AutoCloseable {
     private final ObjectStore store;
     private final ClusterConfig cluster;
     private final MessageSigner signer;
+    private final Metrics metrics;
     private final Gson gson = new Gson();
 
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -71,11 +74,17 @@ public final class NodeServer implements AutoCloseable {
     private Thread acceptThread;
 
     public NodeServer(String nodeId, KeyPair selfKeyPair, int port, ObjectStore store, ClusterConfig cluster) {
+        this(nodeId, selfKeyPair, port, store, cluster, new Metrics());
+    }
+
+    public NodeServer(String nodeId, KeyPair selfKeyPair, int port, ObjectStore store,
+                      ClusterConfig cluster, Metrics metrics) {
         this.nodeId = nodeId;
         this.configuredPort = port;
         this.store = store;
         this.cluster = cluster;
         this.signer = new MessageSigner(nodeId, selfKeyPair, cluster.publicKeysByNodeId());
+        this.metrics = metrics;
     }
 
     /** Binds synchronously, so a caller (or a test) knows the node is reachable on return. */
@@ -164,30 +173,51 @@ public final class NodeServer implements AutoCloseable {
             }
         } catch (MessageSigner.AuthenticationException e) {
             LOG.warning("[" + nodeId + "] rejected unauthenticated message: " + e.getMessage());
+            metrics.incCounter("quiver_messages_rejected_total",
+                    "Inbound messages rejected before being processed", labels("reason", "auth"));
             return;
         } catch (JsonSyntaxException | IllegalArgumentException | IllegalStateException e) {
             LOG.warning("[" + nodeId + "] rejected malformed message: " + e.getMessage());
+            metrics.incCounter("quiver_messages_rejected_total",
+                    "Inbound messages rejected before being processed", labels("reason", "malformed"));
             return;
         }
         process(message);
     }
 
     private void process(SyncMessage msg) {
+        metrics.incCounter("quiver_messages_received_total",
+                "Authenticated inbound messages, by type", labels("type", msg.type.name()));
         switch (msg.type) {
-            case CREATE -> store.applyRemoteCreate(msg.objectName, msg.ownerNodeId);
+            case CREATE -> {
+                if (store.applyRemoteCreate(msg.objectName, msg.ownerNodeId)
+                        == ObjectStore.CreateOutcome.CREATED) {
+                    metrics.incCounter("quiver_objects_created_total",
+                            "Objects newly created on this node", labels("source", "remote"));
+                }
+            }
 
             case UPDATE -> {
                 ObjectStore.MergeOutcome outcome = store.applyRemoteUpdate(
                         msg.objectName, msg.value, msg.toVectorClock(), msg.senderNodeId);
                 switch (outcome) {
-                    case ACCESS_DENIED -> LOG.warning("[" + nodeId + "] refused write to '"
-                            + msg.objectName + "' from unauthorised node '" + msg.senderNodeId + "'");
+                    case MERGED -> metrics.incCounter("quiver_writes_applied_total",
+                            "Writes accepted into the CRDT", labels("source", "remote"));
+                    case IGNORED -> metrics.incCounter("quiver_writes_ignored_total",
+                            "Writes that lost a conflict or were duplicates", labels("source", "remote"));
+                    case ACCESS_DENIED -> {
+                        LOG.warning("[" + nodeId + "] refused write to '"
+                                + msg.objectName + "' from unauthorised node '" + msg.senderNodeId + "'");
+                        metrics.incCounter("quiver_writes_denied_total",
+                                "Writes refused: sender not authorized, or object unknown", labels("source", "remote", "reason", "unauthorized"));
+                    }
                     case UNKNOWN_OBJECT -> {
                         LOG.info("[" + nodeId + "] update for unknown object '" + msg.objectName
                                 + "'; requesting full state from " + msg.senderNodeId);
+                        metrics.incCounter("quiver_writes_denied_total",
+                                "Writes refused: sender not authorized, or object unknown", labels("source", "remote", "reason", "unknown_object"));
                         sendTo(msg.senderNodeId, SyncMessage.syncRequest(nodeId));
                     }
-                    default -> LOG.fine(() -> "[" + nodeId + "] " + outcome + " '" + msg.objectName + "'");
                 }
             }
 
@@ -197,10 +227,20 @@ public final class NodeServer implements AutoCloseable {
                 if (outcome == ObjectStore.GrantOutcome.NOT_OWNER) {
                     LOG.warning("[" + nodeId + "] refused grant on '" + msg.objectName
                             + "' from non-owner '" + msg.senderNodeId + "'");
+                    metrics.incCounter("quiver_grants_denied_total",
+                            "Grants refused because the requester is not the owner",
+                            labels("source", "remote"));
+                } else if (outcome == ObjectStore.GrantOutcome.GRANTED) {
+                    metrics.incCounter("quiver_grants_applied_total",
+                            "Write-permission grants applied", labels("source", "remote"));
                 }
             }
 
-            case SYNC_REQUEST -> sendTo(msg.senderNodeId, SyncMessage.state(store.snapshot(), nodeId));
+            case SYNC_REQUEST -> {
+                metrics.incCounter("quiver_sync_requests_received_total",
+                        "Full-state sync requests received from peers", Map.of());
+                sendTo(msg.senderNodeId, SyncMessage.state(store.snapshot(), nodeId));
+            }
 
             case STATE -> store.applySnapshot(msg.objects, msg.senderNodeId);
         }
@@ -215,6 +255,8 @@ public final class NodeServer implements AutoCloseable {
     }
 
     public void requestFullSyncFromPeers() {
+        metrics.incCounter("quiver_sync_requests_sent_total",
+                "Full-state sync requests sent to peers", Map.of());
         broadcast(SyncMessage.syncRequest(nodeId));
     }
 
@@ -234,9 +276,15 @@ public final class NodeServer implements AutoCloseable {
             PrintWriter writer = new PrintWriter(
                     new java.io.OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true);
             writer.println(line);
+            metrics.incCounter("quiver_messages_sent_total",
+                    "Outbound messages written to a peer connection",
+                    labels("type", message.type.name()));
         } catch (IOException e) {
             // Unreachable peers are normal in a partitioned cluster, not an error.
             LOG.fine(() -> "[" + nodeId + "] could not reach " + peer + " (" + e.getMessage() + ")");
+            metrics.incCounter("quiver_peer_unreachable_total",
+                    "Outbound sends that failed because a peer could not be reached",
+                    labels("peer", peer.nodeId));
         }
     }
 
@@ -261,5 +309,20 @@ public final class NodeServer implements AutoCloseable {
         } catch (IOException ignored) {
             // nothing useful to do during shutdown
         }
+    }
+
+    /**
+     * Builds a label map from alternating key/value strings, e.g. {@code labels("reason",
+     * "auth")}. This node's own id is deliberately never one of these labels: each node
+     * runs its own {@code /metrics} endpoint on its own port, so a real Prometheus
+     * server already disambiguates nodes via the {@code instance} label it derives from
+     * the scrape target address — baking the id in here too would just duplicate that.
+     */
+    private static Map<String, String> labels(String... keyValuePairs) {
+        Map<String, String> map = new java.util.LinkedHashMap<>();
+        for (int i = 0; i + 1 < keyValuePairs.length; i += 2) {
+            map.put(keyValuePairs[i], keyValuePairs[i + 1]);
+        }
+        return map;
     }
 }

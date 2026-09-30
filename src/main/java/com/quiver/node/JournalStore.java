@@ -9,8 +9,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import com.quiver.observability.Metrics;
 
 /**
  * An append-only, crash-durable log of {@link ObjectStore.ObjectSnapshot} entries.
@@ -34,21 +37,28 @@ public final class JournalStore implements AutoCloseable {
 
     private final RandomAccessFile file;
     private final FileChannel channel;
+    private final Metrics metrics;
 
-    private JournalStore(RandomAccessFile file) {
+    private JournalStore(RandomAccessFile file, Metrics metrics) {
         this.file = file;
         this.channel = file.getChannel();
+        this.metrics = metrics;
     }
 
     /** Opens (creating if necessary) the journal file at {@code path} for appending. */
     public static JournalStore open(Path path) throws IOException {
+        return open(path, new Metrics());
+    }
+
+    /** As {@link #open(Path)}, additionally recording append counts to {@code metrics}. */
+    public static JournalStore open(Path path, Metrics metrics) throws IOException {
         Path parent = path.toAbsolutePath().getParent();
         if (parent != null) {
             Files.createDirectories(parent);
         }
         RandomAccessFile raf = new RandomAccessFile(path.toFile(), "rw");
         raf.seek(raf.length());
-        return new JournalStore(raf);
+        return new JournalStore(raf, metrics);
     }
 
     /**
@@ -91,8 +101,12 @@ public final class JournalStore implements AutoCloseable {
             String line = GSON.toJson(snapshot) + "\n";
             file.write(line.getBytes(StandardCharsets.UTF_8));
             channel.force(false); // fsync data (not metadata) so a crash right after this call loses nothing
+            metrics.incCounter("quiver_journal_appends_total",
+                    "Snapshots appended to the on-disk journal", Map.of());
         } catch (IOException e) {
             LOG.log(Level.WARNING, "Failed to persist journal entry for '" + snapshot.name() + "'", e);
+            metrics.incCounter("quiver_journal_append_failures_total",
+                    "Journal appends that failed, e.g. disk full", Map.of());
         }
     }
 

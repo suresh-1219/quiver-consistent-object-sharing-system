@@ -29,6 +29,9 @@ clocks, authenticated peer-to-peer sync, and an ownership/permission model.
 - **Crash-durable persistence** — every successful mutation is appended to an on-disk
   journal and replayed on restart, so a node's state survives a restart even with every
   peer offline
+- **Structured JSON logs and Prometheus metrics** — `--log-format=json` turns every log
+  line into one structured JSON object, and every node serves a `/metrics` endpoint
+  a real Prometheus server can scrape with no code changes on its end
 - **Interactive CLI** — `create`, `update`, `set-permission`, `status`, `list`, `help`, `exit`
 
 ## Design notes
@@ -120,6 +123,53 @@ What this still does **not** give you:
   a legitimate source — the same way a freshly-created SSH `known_hosts` file has to be
   trusted somehow the first time.
 
+## Observability
+
+### Structured logs
+
+By default, logs are the standard `java.util.logging` human-readable format. Pass
+`--log-format=json` and every existing log line — from every part of the codebase,
+with no call site rewritten — becomes one JSON object per line instead:
+
+```json
+{"time":"2026-09-26T18:04:12.501Z","level":"WARNING","logger":"NodeServer","node":"A","message":"[A] rejected unauthenticated message: bad MAC from 'Z'"}
+```
+
+This works by installing one `Formatter` on the root logger at startup, rather than
+changing every `LOG.warning(...)` call site to build structured fields by hand. That
+keeps the change small and low-risk — see `JsonLogFormatter`'s javadoc for the full
+reasoning — at the cost of the structured fields being limited to what
+`java.util.logging.LogRecord` already carries (time, level, logger, message, node id,
+and exception details when present) rather than arbitrary custom key/value pairs per
+call site.
+
+### Metrics
+
+Every node serves a Prometheus-compatible `/metrics` endpoint, on its own port
+(defaults to the node's port **+ 1000** — e.g. node A on `9001` serves metrics on
+`10001`). No setup needed beyond pointing a Prometheus server's scrape config at it, or
+just curling it yourself:
+
+```bash
+curl http://localhost:10001/metrics
+```
+
+Counters cover the things worth alerting on: messages sent/received/rejected (by
+reason — bad signature, malformed, replay), writes applied/ignored/denied, objects and
+grants created, sync requests, journal append failures, and unreachable peers. A gauge
+reports the number of objects currently known to the node.
+
+This is a small hand-rolled registry (`Metrics`, `MetricsHttpServer`), not the official
+Prometheus Java client — the actual wire format it needs to produce is a simple,
+stable, documented text format, and rendering it correctly by hand avoids a dependency
+that would need Maven Central access to add. A real Prometheus server scraping the
+endpoint cannot tell the difference.
+
+Override the port with `--metrics-port=<port>`, or disable it entirely with
+`--no-metrics`. A metrics failure (port already in use, or — on a stripped-down JRE
+image without the `jdk.httpserver` module — missing at the JVM level) never stops the
+node itself from starting; it's logged and the node runs on without it.
+
 ## Tech stack
 
 | Technology | Usage |
@@ -128,6 +178,7 @@ What this still does **not** give you:
 | Raw TCP sockets | Node-to-node networking |
 | Gson | JSON (de)serialisation |
 | java.security Ed25519 (JEP 339) | Message authentication, no external crypto library |
+| jdk.httpserver (`com.sun.net.httpserver`) | Prometheus `/metrics` endpoint, no web framework |
 | Custom CRDTs | Conflict-free convergence |
 | JUnit 5 | Unit and socket-level integration tests |
 | Maven | Build |
@@ -221,6 +272,13 @@ config.json so peers trust it:
 Paste that `publicKey` value into every peer's `config.json` for node A, and `my-data/`
 (gitignored) now holds A's real private key instead of the demo one.
 
+### Structured logs and metrics
+
+Add `--log-format=json` to any of the commands above for structured JSON logs instead of
+the default human-readable format, and check `http://localhost:10001/metrics` (node A's
+default metrics port — each node's is its own port + 1000) once it's running. See
+"Observability" above for what's actually in there and why it's built the way it is.
+
 ### CLI commands
 
 | Command | Example | Description |
@@ -265,6 +323,11 @@ These are deliberate boundaries, not oversights:
 - **No key revocation, rotation, or trust bootstrap.** See "Security model" — closing the
   non-repudiation gap didn't remove every open question asymmetric crypto raises, just
   the one this project set out to fix.
+- **Metrics endpoint is unauthenticated.** Conventional for Prometheus scrape targets,
+  but it does mean anyone who can reach the port can see internal counts — fine on a
+  private network, not something to expose publicly.
+- **No distributed tracing.** Metrics say *how many*; a trace across nodes for *this one*
+  sync request doesn't exist here.
 
 ## License
 
