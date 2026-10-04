@@ -128,3 +128,10 @@ docker compose up --build -d
 
 Docker's layer caching means this only re-runs `mvn package` (not the dependency
 download) if only your `src/` changed.
+
+## Breaking it on purpose
+
+Once the cluster above is running, see `CHAOS.md` for a runbook that kills containers,
+cuts the Docker network, and freezes a node mid-session — the same scenarios the
+automated `ChaosIntegrationTest`/`ChaosClusterTest` suite covers inside a JVM, run here
+against the real thing instead.

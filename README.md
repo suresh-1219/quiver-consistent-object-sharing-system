@@ -32,6 +32,9 @@ clocks, authenticated peer-to-peer sync, and an ownership/permission model.
 - **Structured JSON logs and Prometheus metrics** — `--log-format=json` turns every log
   line into one structured JSON object, and every node serves a `/metrics` endpoint
   a real Prometheus server can scrape with no code changes on its end
+- **Chaos-tested convergence** — automated tests kill nodes mid-session, flood sockets
+  with garbage, and cut/reorder messages across a real three-node mesh with per-edge
+  fault injection; `CHAOS.md` extends the same scenarios to real Docker containers
 - **Interactive CLI** — `create`, `update`, `set-permission`, `status`, `list`, `help`, `exit`
 
 ## Design notes
@@ -169,6 +172,37 @@ Override the port with `--metrics-port=<port>`, or disable it entirely with
 `--no-metrics`. A metrics failure (port already in use, or — on a stripped-down JRE
 image without the `jdk.httpserver` module — missing at the JVM level) never stops the
 node itself from starting; it's logged and the node runs on without it.
+
+## Chaos testing
+
+Most of this README's claims are proven by tests that assume a healthy network.
+`ChaosIntegrationTest` and `ChaosClusterTest` deliberately don't: they kill nodes without
+warning, flood connections with malformed and binary garbage, cut individual directed
+edges of a three-node mesh mid-session, delay and reorder messages, and run many
+randomised trials of partition-write-heal-converge in a loop — then check the same
+things every other test checks: does persistence actually survive, does the CRDT still
+converge, does ownership and the ACL travel with the state.
+
+Fault injection happens entirely in a small hand-rolled `ChaosProxy` (test-only, no
+dependency of its own — the same "use the JDK, write what's missing by hand" approach as
+`Metrics` and `MessageSigner`) sitting on the wire between two nodes. Nothing in
+`NodeServer`, `ObjectStore`, or the CRDT is touched or even aware a test is running: a
+cut connection looks exactly like any other unreachable peer, so these tests exercise
+the error handling that already exists rather than adding a second code path that only
+runs during a test.
+
+One property worth highlighting, proven by `writeReachesAnIsolatedPairViaAThirdNodeRelay`:
+two nodes that can't reach each other directly can still converge, as long as some third
+node can reach both — not because Quiver implements gossip, but because full state
+transfer means a healthy node's reply to a `SYNC_REQUEST` already carries whatever it
+learned from the node the asker couldn't reach. A full mesh with request/reply sync gets
+one hop of relay resilience for free, and no more than one hop.
+
+A single JVM can fake a lot, but not a real `SIGKILL` or a real severed network link.
+`CHAOS.md` is a manual runbook that runs the same kinds of scenarios against the actual
+containers from `docker-compose.yml` — `docker kill`, `docker network disconnect`,
+`docker pause` — for the two things worth checking against the real thing, not a good
+approximation of it.
 
 ## Tech stack
 
@@ -328,6 +362,9 @@ These are deliberate boundaries, not oversights:
   private network, not something to expose publicly.
 - **No distributed tracing.** Metrics say *how many*; a trace across nodes for *this one*
   sync request doesn't exist here.
+- **Chaos testing covers single-host faults.** Everything in `CHAOS.md` runs on one
+  Docker host; multi-host partitions, disk corruption beyond a torn journal line, and
+  clock skew between nodes are untested.
 
 ## License
 

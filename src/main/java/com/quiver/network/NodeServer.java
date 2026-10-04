@@ -60,6 +60,7 @@ public final class NodeServer implements AutoCloseable {
     private final ClusterConfig cluster;
     private final MessageSigner signer;
     private final Metrics metrics;
+    private final java.util.function.BiPredicate<String, String> linkAllowed;
     private final Gson gson = new Gson();
 
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -79,12 +80,27 @@ public final class NodeServer implements AutoCloseable {
 
     public NodeServer(String nodeId, KeyPair selfKeyPair, int port, ObjectStore store,
                       ClusterConfig cluster, Metrics metrics) {
+        this(nodeId, selfKeyPair, port, store, cluster, metrics, (from, to) -> true);
+    }
+
+    /**
+     * @param linkAllowed consulted before every outbound send: {@code linkAllowed.test(this
+     *     node's id, the peer's id)} returning {@code false} makes the send behave exactly
+     *     like an unreachable peer (logged, counted, not fatal), without actually touching
+     *     a socket. Production code never needs this — the four-and-five-argument
+     *     constructors default to "every link always allowed" — it exists so tests can
+     *     simulate a network partition between specific nodes without standing up a real
+     *     proxy. See {@code NetworkPartition} in the test sources.
+     */
+    public NodeServer(String nodeId, KeyPair selfKeyPair, int port, ObjectStore store, ClusterConfig cluster,
+                      Metrics metrics, java.util.function.BiPredicate<String, String> linkAllowed) {
         this.nodeId = nodeId;
         this.configuredPort = port;
         this.store = store;
         this.cluster = cluster;
         this.signer = new MessageSigner(nodeId, selfKeyPair, cluster.publicKeysByNodeId());
         this.metrics = metrics;
+        this.linkAllowed = linkAllowed;
     }
 
     /** Binds synchronously, so a caller (or a test) knows the node is reachable on return. */
