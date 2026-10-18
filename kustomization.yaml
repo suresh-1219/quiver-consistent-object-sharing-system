@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: quiver
+
+# This file lives at the project root, not inside k8s/, on purpose: kustomize (and so
+# `kubectl apply -k`) refuses to read files from outside the kustomization's own
+# directory tree, and `kubectl` offers no flag to relax that. Rooting it here keeps
+# docker/config.json *below* the root, so one real file can feed both Docker Compose
+# and Kubernetes instead of needing a second, drift-prone copy under k8s/.
+resources:
+  - k8s/namespace.yaml
+  - k8s/node-a.yaml
+  - k8s/node-b.yaml
+  - k8s/node-c.yaml
+
+# Generates the quiver-config ConfigMap directly from your own already-verified
+# docker/config.json, rather than a second, separately-authored copy of
+# security-sensitive content (the Ed25519 public keys) that could drift out of sync
+# with the real one — or be wrong from the start.
+configMapGenerator:
+  - name: quiver-config
+    files:
+      - config.json=docker/config.json
+
+generatorOptions:
+  # A deterministic name (no content-hash suffix) keeps `kubectl get configmap`
+  # predictable for a demo. The cost: editing config.json and re-applying won't
+  # automatically roll the Deployments the way kustomize's default hashed name would;
+  # `kubectl rollout restart deployment -n quiver --all` after a config change is a
+  # fine trade at this project's size.
+  disableNameSuffixHash: true

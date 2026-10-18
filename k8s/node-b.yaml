@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: quiver-node-b-data
+  namespace: quiver
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quiver-node-b
+  namespace: quiver
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: quiver, node: b }
+  template:
+    metadata:
+      labels: { app: quiver, node: b }
+    spec:
+      containers:
+        - name: quiver
+          image: quiver:latest
+          imagePullPolicy: Never
+          args:
+            - --node-id=B
+            - --config=/etc/quiver/config.json
+            - --data-dir=/app/quiver-data
+          stdin: true
+          tty: true
+          ports:
+            - name: peer
+              containerPort: 9001
+            - name: metrics
+              containerPort: 10001
+          volumeMounts:
+            - name: config
+              mountPath: /etc/quiver
+              readOnly: true
+            - name: data
+              mountPath: /app/quiver-data
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          readinessProbe:
+            tcpSocket: { port: peer }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: peer }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+      volumes:
+        - name: config
+          configMap: { name: quiver-config }
+        - name: data
+          persistentVolumeClaim: { claimName: quiver-node-b-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-b
+  namespace: quiver
+spec:
+  selector: { app: quiver, node: b }
+  ports:
+    - name: peer
+      port: 9001
+      targetPort: 9001
+    - name: metrics
+      port: 10001
+      targetPort: 10001

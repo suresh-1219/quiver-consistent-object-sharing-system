@@ -1,0 +1,99 @@
+# Node A's journal volume. ReadWriteOnce is fine: exactly one pod (this node) ever
+# mounts it. 100Mi is generous for a demo — the journal is append-only and never
+# compacts (see README's "Known limitations"), so a long-lived real deployment would
+# need to watch this.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: quiver-node-a-data
+  namespace: quiver
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 100Mi
+---
+# One Deployment per node, not a single Deployment scaled to 3 replicas or a
+# StatefulSet with ordinal-derived identity. Quiver's membership is static and
+# config-driven (see config.json) — there is no join protocol, so a node's identity
+# ("I am A") is not interchangeable with any other replica's. A Deployment per named
+# node matches that reality; a StatefulSet would be the right tool only once the
+# project supports nodes joining/leaving dynamically, which it doesn't yet.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quiver-node-a
+  namespace: quiver
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: quiver, node: a }
+  template:
+    metadata:
+      labels: { app: quiver, node: a }
+    spec:
+      containers:
+        - name: quiver
+          image: quiver:latest
+          imagePullPolicy: Never # local image only — see K8S.md before changing this
+          args:
+            - --node-id=A
+            - --config=/etc/quiver/config.json
+            - --data-dir=/app/quiver-data
+          # Required for `kubectl attach` to give a real interactive quiver> prompt —
+          # the same stdin/tty requirement docker-compose.yml needed, and for the same
+          # reason: Main's CLI loop and the network server share one process, so
+          # closed stdin shuts the whole node down (see README and DOCKER.md).
+          stdin: true
+          tty: true
+          ports:
+            - name: peer
+              containerPort: 9001
+            - name: metrics
+              containerPort: 10001
+          volumeMounts:
+            - name: config
+              mountPath: /etc/quiver
+              readOnly: true
+            - name: data
+              mountPath: /app/quiver-data
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          # TCP probe on the peer port, deliberately — not an HTTP probe on /metrics,
+          # even though /metrics would be a richer signal. Kubelet probes connect to the
+          # pod's IP from outside the container, and the peer port is already *proven*
+          # reachable that way (Docker Compose nodes talk to each other over it). Whether
+          # MetricsHttpServer binds all interfaces or loopback only has not been
+          # verified, and a wrong guess here means every probe fails and Kubernetes
+          # kill-restarts the pod forever. See K8S.md for the upgrade path.
+          readinessProbe:
+            tcpSocket: { port: peer }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: peer }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+      volumes:
+        - name: config
+          configMap: { name: quiver-config }
+        - name: data
+          persistentVolumeClaim: { claimName: quiver-node-a-data }
+---
+# Named "node-a" to exactly match the host your existing docker/config.json already
+# declares for this node — so that file works here completely unedited.
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-a
+  namespace: quiver
+spec:
+  selector: { app: quiver, node: a }
+  ports:
+    - name: peer
+      port: 9001
+      targetPort: 9001
+    - name: metrics
+      port: 10001
+      targetPort: 10001
