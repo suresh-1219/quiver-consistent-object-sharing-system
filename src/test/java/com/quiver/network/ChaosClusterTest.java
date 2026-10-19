@@ -166,15 +166,16 @@ class ChaosClusterTest {
             mesh.stores.get("A").grantPermission("doc1", "write", "B", "A");
             mesh.stores.get("A").grantPermission("doc1", "write", "C", "A");
             mesh.servers.get("A").broadcast(SyncMessage.create("doc1", "A"));
+            // Wait for the CREATE to land everywhere before sending the grants. Each
+            // broadcast opens its own connection and the receiver handles connections on
+            // separate threads, so messages can be processed out of order; a GRANT that
+            // arrives before its CREATE is discarded as "unknown object" and never retried.
+            await(() -> mesh.stores.get("B").objectExists("doc1")
+                    && mesh.stores.get("C").objectExists("doc1"));
             mesh.servers.get("A").broadcast(SyncMessage.grantPermission("doc1", "write", "B", "A"));
             mesh.servers.get("A").broadcast(SyncMessage.grantPermission("doc1", "write", "C", "A"));
-            // objectExists is checked too, not just hasWriteAccess: the ACL map can
-            // register an (empty) entry for a name via a GRANT alone, independently of
-            // whether the matching CREATE has landed yet, since ObjectStore's write-
-            // permission map and object map are populated separately. Only checking the
-            // grant here would risk updateObject() below racing a CREATE still in flight.
-            await(() -> mesh.stores.get("B").objectExists("doc1") && mesh.stores.get("B").hasWriteAccess("doc1", "B")
-                    && mesh.stores.get("C").objectExists("doc1") && mesh.stores.get("C").hasWriteAccess("doc1", "C"));
+            await(() -> mesh.stores.get("B").hasWriteAccess("doc1", "B")
+                    && mesh.stores.get("C").hasWriteAccess("doc1", "C"));          
 
             // Randomly sever some subset of the six directed edges.
             for (String from : ids) {
