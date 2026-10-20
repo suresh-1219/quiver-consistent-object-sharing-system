@@ -249,6 +249,18 @@ public final class NodeServer implements AutoCloseable {
                 } else if (outcome == ObjectStore.GrantOutcome.GRANTED) {
                     metrics.incCounter("quiver_grants_applied_total",
                             "Write-permission grants applied", labels("source", "remote"));
+                } else if (outcome == ObjectStore.GrantOutcome.UNKNOWN_OBJECT) {
+                    // A grant can overtake the CREATE it depends on: each broadcast uses its
+                    // own connection, and connections are handled on separate threads.
+                    // Dropping it would lose the permission until the next full sync, so ask
+                    // the sender for its full state now, as an update to an unknown object
+                    // already does. The STATE reply carries the object and its writers.
+                    LOG.info("[" + nodeId + "] grant for unknown object '" + msg.objectName
+                            + "'; requesting full state from " + msg.senderNodeId);
+                    metrics.incCounter("quiver_grants_deferred_total",
+                            "Grants that arrived before their object and triggered a sync request",
+                            labels("source", "remote"));
+                    sendTo(msg.senderNodeId, SyncMessage.syncRequest(nodeId));
                 }
             }
 

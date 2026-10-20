@@ -1,5 +1,6 @@
 package com.quiver.network;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -138,6 +139,30 @@ class NodeSyncIntegrationTest {
         await(() -> "written-before-B-existed".equals(storeB.getObjectValue("doc1")));
         assertEquals("A", storeB.getOwner("doc1"));
         assertTrue(storeB.hasWriteAccess("doc1", "B"), "ACLs must travel with the state");
+    }
+    /**
+     * A grant that reaches a node before the CREATE it depends on must not be lost. Each
+     * broadcast uses its own connection and the receiver handles connections on separate
+     * threads, so this ordering happens for real. Here it is forced: only the GRANT is
+     * broadcast, so B has never heard of doc1 when it arrives. B must answer by asking A
+     * for its full state, which carries both the object and its writers.
+     */
+    @Test
+    void grantThatArrivesBeforeItsCreateIsRecoveredViaSync() throws Exception {
+        ClusterConfig cluster = clusterOf("A", "B");
+        ObjectStore storeA = new ObjectStore("A");
+        ObjectStore storeB = new ObjectStore("B");
+        NodeServer serverA = start("A", cluster, storeA);
+        start("B", cluster, storeB);
+
+        storeA.createObject("doc1");
+        storeA.grantPermission("doc1", "write", "B", "A");
+        // Deliberately no CREATE broadcast: B has never heard of doc1.
+        assertFalse(storeB.objectExists("doc1"));
+        serverA.broadcast(SyncMessage.grantPermission("doc1", "write", "B", "A"));
+
+        await(() -> storeB.objectExists("doc1") && storeB.hasWriteAccess("doc1", "B"));
+        assertEquals("A", storeB.getOwner("doc1"));
     }
 
     // ------------------------------------------------------------------------- helpers
